@@ -1,0 +1,131 @@
+
+# BNO070 Host Interface Library
+
+The purpose of this library is to provide a simple interface to the BNO070
+on microcontroller-based platforms.
+
+## Low-level interface
+
+Communication with the BNO070 occurs through I2C and a set of GPIOs. The details
+for how to interface with these vary per platform, so a set of functions need
+to be implemented for each port. The easiest route is likely to copy/paste from the examples
+directory. The required functions are listed in `sensorhub.h` and reproduced below:
+
+```
+typedef struct sensorhub_s {
+    uint8_t sensorhubAddress;
+    uint8_t bootloaderAddress;
+
+    sensorhub_stats_t *stats;
+
+    int (*i2cTransfer) (const struct sensorhub_s * sh, uint8_t address,
+                        const uint8_t * sendData, int sendLength,
+                        uint8_t * receiveData, int receiveLength);
+
+    void (*setRSTN) (const struct sensorhub_s * sh, int value);
+    void (*setBOOTN) (const struct sensorhub_s * sh, int value);
+    int (*getHOST_INTN) (const struct sensorhub_s * sh);
+
+    void (*delay) (const struct sensorhub_s * sh, int milliseconds);
+    uint32_t(*getTick) (const struct sensorhub_s * sh);
+    void (*onError) (const struct sensorhub_s * sh, int err);
+    int max_retries;
+    void *cookie;
+} sensorhub_t;
+```
+
+The recommended method of initializing this structure is to define it as a static global variable
+so that it can be included with the constant data section in your application. The structure is
+not modified at runtime by the BNO Host Interface Library and library functions can be used
+without calling any initialization functions first. Of course, you will want to call `sensorhub_probe`
+to initialize the BNO on power up, but if the microcontroller is put to sleep or reset independent
+of the BNO, it is unnecessary to call `sensorhub_probe` again.
+
+The `i2cTransfer` function handles both I2C sends and receives to the BNO. Note that when the
+BNO host interface needs to read data from the BNO, it will call `i2CTransfer` with both
+`sendData` and `receiveData`. Those must be tranferred without an I2C stop in between. See
+the examples for details.
+
+On some platforms, an I2C failure occurs at random times and a simple retry is enough
+to fix the issue. If this is the case, setting `max_retries` to 1 or higher is needed.
+If a retry can't fix an issue or a hard error occurs, the `onError` function will be called
+and error returns propogated back through library functions. Application code can choose
+to check all return codes or implement an `onError` function.
+
+## Nucleo STM32F401re / BNO070 connections
+
+The example provided in this file is designed to run on a Nucleo
+STM32F401re eval board, connected to Bosch Shuttle board.  The
+following table describes the connections necessary between these two
+boards:
+
+| Name    | Nucleo      | STM32F401      | BNO070              | Notes/Description |
+|         | Connector   | Port           | Shuttleboard        |                   |
+| ------- | ----------- | -------------- | ------------------- | ----------------- |
+| 3V3     | 3V3         |                | 1 and 2             | 2.8 - 3.6V |
+| GND     | GND         |                | 3                   | |
+| SCL     | SCL         | PB8            | 18                  | **Pull up to 3V3 with 2.2k** |
+| SDA     | SDA         | PB9            | 17                  | **Pull up to 3V3 with 2.2k** |
+| SA0     | -           | -              | 22                  | I2C Addr sel.  Tied low. |
+| INTN    | D2          | PA10           | 21                  | polled by getHOST_INTN function |
+| BOOTN   | D4          | PB5            | 14                  | set by setBOOTN function |
+| RSTN    | D5          | PB4            | 19                  | set by setRSTN function |
+
+## IAR Embeded Workbench Example Project
+
+To compile and run the example code on the Nucleo STM32F401re
+platform, begin by opening the project file,
+bno-hostif\examples\nucleo-f401re\Projects\EWARM\Project.eww in
+Embedded Workbench.  The project should compile successfully and can
+be downloaded to the Nucleo eval board.  When run, the debug console
+window will show the sensorhub being initialized then configured to
+report the Rotation Vector periodically.
+
+## Example usage
+
+In typical use, applications will have a task or thread that runs the BNO host interface code and
+an interrupt handler that is triggered by the BNO's HOST_INTN line. The host interface
+library provides no code for the interrupt handler since that is expected to be platform dependent.
+Its only responsibility, though, is to notify the BNO host interface code that an event
+is available. Sending events on all falling transitions is sufficient. The following pseudo
+code is typical:
+
+```
+  /* Initialize the BNO */
+  sensorhub_probe();
+
+  /* Configure the BNO to send events */
+  sensorhub_setDynamicFeature();
+
+  while (1) {
+
+      wait_for_event();
+
+      if (HOST_INTN interrupt event) {
+          /* Read all events from the BNO */
+          sensorhub_poll();
+
+          dispatch_events();
+      }
+  }
+```
+
+## BNO Firmware update (DFU)
+
+It is possible to upgrade the firmware on the BNO070. To do this, the new firmware must
+be preprocessed and optionally linked to the application. The preprocessing tool is
+`util/hex2dfu.py`. It can output either a binary or a C char array for linking with the
+application. Install Python and run as follows:
+
+    util/hex2dfu.py 1000-3251_x.y.z.hex 1000-3251_x.y.z.c
+
+The C file should be linked to your application. Add the following line to the application
+to update the firmware:
+
+    sensorhub_dfu(&sensorhub, sensorhub_dfu_stream, sizeof(sensorhub_dfu_stream));
+
+You do not need to call `sensorhub_probe()` first. Firmware update takes 10s of seconds,
+and the BNO070 is reset at the end. If a CRC fails or another error occurs, `sensorhub_dfu()`
+returns an error.
+
+
